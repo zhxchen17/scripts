@@ -1,0 +1,2 @@
+model = "openai/gpt-oss-120b"
+tensor_parallel_size = 4

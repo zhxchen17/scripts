@@ -1,0 +1,2 @@
+model = "zai-org/GLM-5"
+tensor_parallel_size = 8
