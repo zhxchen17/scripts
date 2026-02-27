@@ -2,6 +2,7 @@
 """Benchmark torch.compile cold-start and warm-start times for vLLM offline inference."""
 
 import argparse
+import concurrent.futures
 import fnmatch
 import getpass
 import io
@@ -200,22 +201,79 @@ def discover_configs(configs_dir: str | Path, pattern: str) -> list[Path]:
     return matched
 
 
-def print_results_table(results: list[dict]) -> None:
+_HAS_FBURL = shutil.which("fburl") is not None
+
+
+def _shorten_url(url: str) -> str:
+    """Shorten *url* via ``fburl`` if available, otherwise return as-is."""
+    if not _HAS_FBURL or not url:
+        return url
+    try:
+        result = subprocess.run(
+            ["fburl", url],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        short = result.stdout.strip()
+        return short if short else url
+    except Exception:
+        return url
+
+
+def _run_tlparse(trace_dir: str) -> str:
+    """Run ``tlparse parse`` on *trace_dir* and return the rank-0 URL."""
+    if not trace_dir:
+        return ""
+    try:
+        result = subprocess.run(
+            ["tlparse", "parse", trace_dir],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if result.returncode != 0:
+            return "(error)"
+        for line in result.stdout.splitlines():
+            if "rank_0" in line or "rank0" in line:
+                url_match = re.search(r"https?://\S+", line)
+                if url_match:
+                    return _shorten_url(url_match.group(0))
+        url_match = re.search(r"https?://\S+", result.stdout)
+        if url_match:
+            return _shorten_url(url_match.group(0))
+        return "(error)"
+    except Exception:
+        return "(error)"
+
+
+def _run_tlparse_parallel(trace_dirs: list[str]) -> dict[str, str]:
+    """Run tlparse on all *trace_dirs* in parallel, return {trace_dir: url}."""
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(trace_dirs)
+    ) as pool:
+        futures = {d: pool.submit(_run_tlparse, d) for d in trace_dirs}
+        return {d: f.result() for d, f in futures.items()}
+
+
+def print_results_table(results: list[dict], show_trace_dirs: bool = False) -> None:
     """Print a formatted summary table."""
-    header = (
-        "Model", "Cold Start (s)", "Warm Start Avg (s)",
-        "Cold Trace", "Warm Trace",
-    )
-    rows = [
-        (
+    header = ["Model", "Cold Start (s)", "Warm Start Avg (s)"]
+    if show_trace_dirs:
+        header += ["Cold Trace", "Warm Trace"]
+    header += ["Cold tlparse", "Warm tlparse"]
+
+    rows = []
+    for r in results:
+        row = [
             r["model"],
             f"{r['cold_start']:.2f}",
             f"{r['warm_start_avg']:.2f}",
-            r["cold_trace"],
-            r["warm_trace"],
-        )
-        for r in results
-    ]
+        ]
+        if show_trace_dirs:
+            row += [r["cold_trace"], r["warm_trace"]]
+        row += [r.get("cold_tlparse", ""), r.get("warm_tlparse", "")]
+        rows.append(tuple(row))
 
     ncols = len(header)
     col_widths = [
@@ -256,6 +314,11 @@ def main() -> None:
         help="Directory containing TOML config files (default: ./configs).",
     )
     parser.add_argument(
+        "--show-trace-dirs",
+        action="store_true",
+        help="Show trace directory paths in the output table.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Forward all vLLM subprocess stdout/stderr to the terminal.",
@@ -282,7 +345,20 @@ def main() -> None:
         )
         results.append(result)
 
-    print_results_table(results)
+    # Run tlparse on cold & warm trace dirs in parallel.
+    all_trace_dirs = []
+    for r in results:
+        all_trace_dirs.append(r["cold_trace"])
+        all_trace_dirs.append(r["warm_trace"])
+
+    print("Running tlparse on trace directories…", flush=True)
+    tlparse_urls = _run_tlparse_parallel(all_trace_dirs)
+
+    for r in results:
+        r["cold_tlparse"] = tlparse_urls.get(r["cold_trace"], "")
+        r["warm_tlparse"] = tlparse_urls.get(r["warm_trace"], "")
+
+    print_results_table(results, show_trace_dirs=args.show_trace_dirs)
 
 
 if __name__ == "__main__":
