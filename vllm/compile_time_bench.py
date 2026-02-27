@@ -6,8 +6,10 @@ import fnmatch
 import getpass
 import io
 import os
+import random
 import re
 import shutil
+import string
 import subprocess
 import sys
 import textwrap
@@ -34,6 +36,9 @@ _INFERENCE_SCRIPT = textwrap.dedent(r"""
     llm.generate(["Hello"], SamplingParams(max_tokens=1))
 """)
 
+
+_RUN_ID = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+_TRACE_PREFIX = "/tmp/compile_bench"
 
 _CACHE_DIRS = [
     Path.home() / ".cache" / "vllm",
@@ -78,13 +83,17 @@ def bench_compile_time(
     model_name = config_path.stem
     total_runs = 1 + num_warm_runs
     compile_times: list[float] = []
+    trace_dirs: list[str] = []
 
     # Clear all caches that affect compile times so cold start is truly cold.
     _clear_caches()
 
     for i in range(total_runs):
-        label = "cold" if i == 0 else f"warm-{i}"
+        label = "cold" if i == 0 else f"warm_{i}"
         print(f"[{model_name}] run {i + 1}/{total_runs} ({label}) …", flush=True)
+
+        trace_dir = f"{_TRACE_PREFIX}_{model_name}_{label}_{_RUN_ID}"
+        env = {**os.environ, "TORCH_TRACE": trace_dir}
 
         if debug:
             proc = subprocess.Popen(
@@ -92,6 +101,7 @@ def bench_compile_time(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=env,
             )
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
@@ -124,6 +134,7 @@ def bench_compile_time(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=env,
             )
             try:
                 stdout_text, stderr_text = proc.communicate()
@@ -161,6 +172,8 @@ def bench_compile_time(
             )
             compile_times.append(float("nan"))
 
+        trace_dirs.append(trace_dir)
+
     cold_start = compile_times[0]
     warm_times = compile_times[1:]
     warm_avg = (
@@ -171,6 +184,8 @@ def bench_compile_time(
         "model": model_name,
         "cold_start": cold_start,
         "warm_start_avg": warm_avg,
+        "cold_trace": trace_dirs[0],
+        "warm_trace": trace_dirs[-1] if num_warm_runs > 0 else "",
     }
 
 
@@ -187,14 +202,24 @@ def discover_configs(configs_dir: str | Path, pattern: str) -> list[Path]:
 
 def print_results_table(results: list[dict]) -> None:
     """Print a formatted summary table."""
-    header = ("Model", "Cold Start (s)", "Warm Start Avg (s)")
+    header = (
+        "Model", "Cold Start (s)", "Warm Start Avg (s)",
+        "Cold Trace", "Warm Trace",
+    )
     rows = [
-        (r["model"], f"{r['cold_start']:.2f}", f"{r['warm_start_avg']:.2f}")
+        (
+            r["model"],
+            f"{r['cold_start']:.2f}",
+            f"{r['warm_start_avg']:.2f}",
+            r["cold_trace"],
+            r["warm_trace"],
+        )
         for r in results
     ]
 
+    ncols = len(header)
     col_widths = [
-        max(len(header[i]), *(len(row[i]) for row in rows)) for i in range(3)
+        max(len(header[i]), *(len(row[i]) for row in rows)) for i in range(ncols)
     ]
     fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
     sep = "  ".join("-" * w for w in col_widths)
