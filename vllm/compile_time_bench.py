@@ -6,6 +6,7 @@ import concurrent.futures
 import fnmatch
 import getpass
 import io
+import json
 import os
 import random
 import re
@@ -25,15 +26,27 @@ _COMPILE_TIME_RE = re.compile(r"torch\.compile takes ([\d.]+) s")
 # It reads a TOML config, constructs an LLM, and runs a single generate call
 # (batch size 1).  The compile-time log line is emitted by vllm automatically.
 _INFERENCE_SCRIPT = textwrap.dedent(r"""
-    import sys, tomllib
+    import json, sys, tomllib
     from vllm import LLM, SamplingParams
 
     config_path = sys.argv[1]
+    cc_overrides = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}
+
     with open(config_path, "rb") as f:
         cfg = tomllib.load(f)
 
     model = cfg.pop("model")
-    llm = LLM(model=model, **cfg)
+
+    # Merge compilation_config overrides (deep-merge one level for pass_config).
+    if cc_overrides:
+        cc = cfg.setdefault("compilation_config", {})
+        for k, v in cc_overrides.items():
+            if isinstance(v, dict) and isinstance(cc.get(k), dict):
+                cc[k].update(v)
+            else:
+                cc[k] = v
+
+    llm = LLM(model=model, load_format="dummy", **cfg)
     llm.generate(["Hello"], SamplingParams(max_tokens=1))
 """)
 
@@ -68,6 +81,7 @@ def bench_compile_time(
     config_path: str | Path,
     num_warm_runs: int = 1,
     debug: bool = False,
+    cc_overrides: dict | None = None,
 ) -> dict:
     """Run N+1 vllm offline-inference invocations and collect compile times.
 
@@ -96,9 +110,13 @@ def bench_compile_time(
         trace_dir = f"{_TRACE_PREFIX}_{model_name}_{label}_{_RUN_ID}"
         env = {**os.environ, "TORCH_TRACE": trace_dir}
 
+        cmd = [sys.executable, "-c", _INFERENCE_SCRIPT, str(config_path)]
+        if cc_overrides:
+            cmd.append(json.dumps(cc_overrides))
+
         if debug:
             proc = subprocess.Popen(
-                [sys.executable, "-c", _INFERENCE_SCRIPT, str(config_path)],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -131,7 +149,7 @@ def bench_compile_time(
             stderr_text = "".join(stderr_lines)
         else:
             proc = subprocess.Popen(
-                [sys.executable, "-c", _INFERENCE_SCRIPT, str(config_path)],
+                cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -323,7 +341,25 @@ def main() -> None:
         action="store_true",
         help="Forward all vLLM subprocess stdout/stderr to the terminal.",
     )
+    parser.add_argument(
+        "--default-cudagraph-mode",
+        action="store_true",
+        help="Use vLLM default cudagraph mode. Without this flag, cudagraph is disabled (cudagraph_mode=none).",
+    )
+    parser.add_argument(
+        "--default-pass-config",
+        action="store_true",
+        help="Use vLLM default pass config. Without this flag, fuse_allreduce_rms is disabled.",
+    )
     args = parser.parse_args()
+
+    # By default, disable cudagraph and fuse_allreduce_rms.
+    # Pass --default-cudagraph-mode / --default-pass-config to use vLLM defaults instead.
+    cc_overrides: dict = {}
+    if not args.default_cudagraph_mode:
+        cc_overrides["cudagraph_mode"] = "none"
+    if not args.default_pass_config:
+        cc_overrides.setdefault("pass_config", {})["fuse_allreduce_rms"] = False
 
     configs = discover_configs(args.configs_dir, args.filter)
     if not configs:
@@ -341,7 +377,8 @@ def main() -> None:
     results: list[dict] = []
     for cfg in configs:
         result = bench_compile_time(
-            cfg, num_warm_runs=args.num_warm_runs, debug=args.debug
+            cfg, num_warm_runs=args.num_warm_runs, debug=args.debug,
+            cc_overrides=cc_overrides or None,
         )
         results.append(result)
 
