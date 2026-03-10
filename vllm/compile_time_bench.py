@@ -18,9 +18,11 @@ import textwrap
 import threading
 from pathlib import Path
 
-# Regex to capture the compile time from vllm's monitor log line:
+# Regex to capture the compile time from vllm's monitor log line.
+# Handles both old and new formats:
 #   "torch.compile takes 123.45 s in total"
-_COMPILE_TIME_RE = re.compile(r"torch\.compile takes ([\d.]+) s")
+#   "torch.compile and initial profiling run took 23.98 s in total"
+_COMPILE_TIME_RE = re.compile(r"torch\.compile\b.+?\b([\d.]+) s")
 
 # Minimal inline script executed as a subprocess for each inference run.
 # It reads a TOML config, constructs an LLM, and runs a single generate call
