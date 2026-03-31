@@ -1,7 +1,7 @@
 """Offline vLLM inference benchmark with torch profiler.
 
 Example usage:
-python ./vllm/offline_bench.py --model meta-llama/meta-llama-3-8b --input-len 512 \
+python ./vllm/overhead_bench.py --model meta-llama/meta-llama-3-8b --input-len 512 \
      --output-len 4 --num-prompts 8 --profile --with-stack --trace-dir ./trace
 """
 
@@ -57,6 +57,8 @@ def main():
 
     # Profiled run
     if args.profile:
+        os.makedirs(args.trace_dir, exist_ok=True)
+        existing = set(os.listdir(args.trace_dir))
         print(f"Running with torch profiler (trace dir: {args.trace_dir}) ...")
         with torch.profiler.profile(
             activities=[
@@ -69,6 +71,9 @@ def main():
             t0 = time.perf_counter()
             outputs = llm.generate(prompts, sampling_params)
             elapsed = time.perf_counter() - t0
+        new_files = set(os.listdir(args.trace_dir)) - existing
+        for f in sorted(new_files):
+            print(f"Trace file: {os.path.join(args.trace_dir, f)}")
     else:
         print("Running (no profiler) ...")
         t0 = time.perf_counter()
