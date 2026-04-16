@@ -16,6 +16,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import tomllib
 from pathlib import Path
 
 # Regex to capture the compile time from vllm's monitor log line.
@@ -97,7 +98,9 @@ def bench_compile_time(
         A dict with keys ``model``, ``cold_start``, ``warm_start_avg``.
     """
     config_path = Path(config_path)
-    model_name = config_path.stem
+    config_label = config_path.stem
+    with open(config_path, "rb") as f:
+        model_name = tomllib.load(f)["model"]
     total_runs = 1 + num_warm_runs
     compile_times: list[float] = []
     trace_dirs: list[str] = []
@@ -109,7 +112,7 @@ def bench_compile_time(
         label = "cold" if i == 0 else f"warm_{i}"
         print(f"[{model_name}] run {i + 1}/{total_runs} ({label}) …", flush=True)
 
-        trace_dir = f"{_TRACE_PREFIX}_{model_name}_{label}_{_RUN_ID}"
+        trace_dir = f"{_TRACE_PREFIX}_{config_label}_{label}_{_RUN_ID}"
         env = {**os.environ, "TORCH_TRACE": trace_dir}
 
         cmd = [sys.executable, "-c", _INFERENCE_SCRIPT, str(config_path)]
@@ -276,12 +279,17 @@ def _run_tlparse_parallel(trace_dirs: list[str]) -> dict[str, str]:
         return {d: f.result() for d, f in futures.items()}
 
 
-def print_results_table(results: list[dict], show_trace_dirs: bool = False) -> None:
+def print_results_table(
+    results: list[dict],
+    show_trace_dirs: bool = False,
+    show_tlparse: bool = True,
+) -> None:
     """Print a formatted summary table."""
     header = ["Model", "Cold Start (s)", "Warm Start Avg (s)"]
     if show_trace_dirs:
         header += ["Cold Trace", "Warm Trace"]
-    header += ["Cold tlparse", "Warm tlparse"]
+    if show_tlparse:
+        header += ["Cold tlparse", "Warm tlparse"]
 
     rows = []
     for r in results:
@@ -292,7 +300,8 @@ def print_results_table(results: list[dict], show_trace_dirs: bool = False) -> N
         ]
         if show_trace_dirs:
             row += [r["cold_trace"], r["warm_trace"]]
-        row += [r.get("cold_tlparse", ""), r.get("warm_tlparse", "")]
+        if show_tlparse:
+            row += [r.get("cold_tlparse", ""), r.get("warm_tlparse", "")]
         rows.append(tuple(row))
 
     ncols = len(header)
@@ -344,6 +353,11 @@ def main() -> None:
         help="Forward all vLLM subprocess stdout/stderr to the terminal.",
     )
     parser.add_argument(
+        "--no-tlparse-in-table",
+        action="store_true",
+        help="Hide tlparse columns from the table and print them separately per model.",
+    )
+    parser.add_argument(
         "--default-cudagraph-mode",
         action="store_true",
         help="Use vLLM default cudagraph mode. Without this flag, cudagraph is disabled (cudagraph_mode=none).",
@@ -371,8 +385,12 @@ def main() -> None:
         )
         sys.exit(1)
 
+    config_models = []
+    for c in configs:
+        with open(c, "rb") as f:
+            config_models.append(tomllib.load(f)["model"])
     print(f"Will benchmark {len(configs)} model(s): "
-          f"{', '.join(c.stem for c in configs)}")
+          f"{', '.join(config_models)}")
     print(f"Runs per model: 1 cold + {args.num_warm_runs} warm")
     print()
 
@@ -397,7 +415,19 @@ def main() -> None:
         r["cold_tlparse"] = tlparse_urls.get(r["cold_trace"], "")
         r["warm_tlparse"] = tlparse_urls.get(r["warm_trace"], "")
 
-    print_results_table(results, show_trace_dirs=args.show_trace_dirs)
+    print_results_table(
+        results,
+        show_trace_dirs=args.show_trace_dirs,
+        show_tlparse=not args.no_tlparse_in_table,
+    )
+
+    if args.no_tlparse_in_table:
+        print("tlparse URLs:")
+        for r in results:
+            print(f"  {r['model']}")
+            print(f"    Cold: {r.get('cold_tlparse', '')}")
+            print(f"    Warm: {r.get('warm_tlparse', '')}")
+        print()
 
 
 if __name__ == "__main__":
