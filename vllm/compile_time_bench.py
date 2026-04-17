@@ -25,6 +25,10 @@ from pathlib import Path
 #   "torch.compile and initial profiling run took 23.98 s in total"
 _COMPILE_TIME_RE = re.compile(r"torch\.compile\b.+?\b([\d.]+) s")
 
+# Regex to capture the initial profiling/warmup time from vllm's monitor log line.
+#   "Initial profiling/warmup run took 3.40 s"
+_PROFILING_TIME_RE = re.compile(r"Initial profiling/warmup run took ([\d.]+) s")
+
 # Minimal inline script executed as a subprocess for each inference run.
 # It reads a TOML config, constructs an LLM, and runs a single generate call
 # (batch size 1).  The compile-time log line is emitted by vllm automatically.
@@ -103,6 +107,7 @@ def bench_compile_time(
         model_name = tomllib.load(f)["model"]
     total_runs = 1 + num_warm_runs
     compile_times: list[float] = []
+    profiling_times: list[float] = []
     trace_dirs: list[str] = []
 
     # Clear all caches that affect compile times so cold start is truly cold.
@@ -196,6 +201,14 @@ def bench_compile_time(
             )
             compile_times.append(float("nan"))
 
+        prof_match = _PROFILING_TIME_RE.search(combined_output)
+        if i > 0 and prof_match:
+            pt = float(prof_match.group(1))
+            profiling_times.append(pt)
+            print(f"  → profiling/warmup took {pt:.2f} s", flush=True)
+        elif i > 0:
+            profiling_times.append(float("nan"))
+
         trace_dirs.append(trace_dir)
 
     cold_start = compile_times[0]
@@ -204,10 +217,15 @@ def bench_compile_time(
         sum(t for t in warm_times if t == t) / max(sum(1 for t in warm_times if t == t), 1)
     )
 
+    warm_profiling_avg = (
+        sum(t for t in profiling_times if t == t) / max(sum(1 for t in profiling_times if t == t), 1)
+    )
+
     return {
         "model": model_name,
         "cold_start": cold_start,
         "warm_start_avg": warm_avg,
+        "warm_profiling_avg": warm_profiling_avg,
         "cold_trace": trace_dirs[0],
         "warm_trace": trace_dirs[-1] if num_warm_runs > 0 else "",
     }
@@ -285,7 +303,8 @@ def print_results_table(
     show_tlparse: bool = True,
 ) -> None:
     """Print a formatted summary table."""
-    header = ["Model", "Cold Start (s)", "Warm Start Avg (s)"]
+    header = ["Model", "Cold Start (s)", "Warm Start Avg (s)",
+               "Warm Profiling Avg (s)"]
     if show_trace_dirs:
         header += ["Cold Trace", "Warm Trace"]
     if show_tlparse:
@@ -297,6 +316,7 @@ def print_results_table(
             r["model"],
             f"{r['cold_start']:.2f}",
             f"{r['warm_start_avg']:.2f}",
+            f"{r['warm_profiling_avg']:.2f}",
         ]
         if show_trace_dirs:
             row += [r["cold_trace"], r["warm_trace"]]
