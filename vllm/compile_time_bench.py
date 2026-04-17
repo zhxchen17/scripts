@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark torch.compile cold-start and warm-start times for vLLM offline inference."""
+"""Benchmark torch.compile cold-compile and warm-compile times for vLLM offline inference."""
 
 import argparse
 import concurrent.futures
@@ -68,7 +68,7 @@ _CACHE_DIRS = [
 
 
 def _clear_caches() -> None:
-    """Remove vllm and torchinductor caches to ensure a true cold start."""
+    """Remove vllm and torchinductor caches to ensure a true cold compile."""
     for d in _CACHE_DIRS:
         if d.exists():
             print(f"  🗑  removing cache: {d}", flush=True)
@@ -95,11 +95,11 @@ def bench_compile_time(
     Args:
         config_path: Path to a TOML config file containing at minimum ``model``
             and any extra kwargs forwarded to ``vllm.LLM``.
-        num_warm_runs: Number of warm-start iterations (default 1).
+        num_warm_runs: Number of warm-compile iterations (default 1).
             Total runs = 1 (cold) + num_warm_runs.
 
     Returns:
-        A dict with keys ``model``, ``cold_start``, ``warm_start_avg``.
+        A dict with keys ``model``, ``cold_compile``, ``warm_compile_avg``.
     """
     config_path = Path(config_path)
     config_label = config_path.stem
@@ -211,7 +211,7 @@ def bench_compile_time(
 
         trace_dirs.append(trace_dir)
 
-    cold_start = compile_times[0]
+    cold_compile = compile_times[0]
     warm_times = compile_times[1:]
     warm_avg = (
         sum(t for t in warm_times if t == t) / max(sum(1 for t in warm_times if t == t), 1)
@@ -223,8 +223,8 @@ def bench_compile_time(
 
     return {
         "model": model_name,
-        "cold_start": cold_start,
-        "warm_start_avg": warm_avg,
+        "cold_compile": cold_compile,
+        "warm_compile_avg": warm_avg,
         "warm_profiling_avg": warm_profiling_avg,
         "cold_trace": trace_dirs[0],
         "warm_trace": trace_dirs[-1] if num_warm_runs > 0 else "",
@@ -303,7 +303,7 @@ def print_results_table(
     show_tlparse: bool = True,
 ) -> None:
     """Print a formatted summary table."""
-    header = ["Model", "Cold Start (s)", "Warm Start Avg (s)",
+    header = ["Model", "Cold Compile (s)", "Warm Compile Avg (s)",
                "Warm Profiling Avg (s)"]
     if show_trace_dirs:
         header += ["Cold Trace", "Warm Trace"]
@@ -314,8 +314,8 @@ def print_results_table(
     for r in results:
         row = [
             r["model"],
-            f"{r['cold_start']:.2f}",
-            f"{r['warm_start_avg']:.2f}",
+            f"{r['cold_compile']:.2f}",
+            f"{r['warm_compile_avg']:.2f}",
             f"{r['warm_profiling_avg']:.2f}",
         ]
         if show_trace_dirs:
@@ -355,7 +355,7 @@ def main() -> None:
         "--num-warm-runs",
         type=int,
         default=1,
-        help="Number of warm-start iterations per model (default: 1).",
+        help="Number of warm-compile iterations per model (default: 1).",
     )
     parser.add_argument(
         "--configs-dir",
