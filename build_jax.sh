@@ -1,5 +1,5 @@
 python build/build.py build --wheels=jaxlib,jax-cuda-plugin,jax-cuda-pjrt --local_xla_path=../xla --editable --cuda_version=12.9.2
-pip install -e dist/*  # installs jaxlib (includes XLA)
+pip install -e dist/jaxlib -e dist/jax_cuda12_plugin[with-cuda] -e dist/jax_cuda12_pjrt  # installs jaxlib (includes XLA)
 pip install -e . # installs jax
 
 # jax depends on cudnn and nccl, there should be no conflict with locally built torch.
